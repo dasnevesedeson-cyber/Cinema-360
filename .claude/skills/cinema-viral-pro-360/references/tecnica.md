@@ -461,7 +461,23 @@ e preserve a transparência (`format=rgba`).
 
 ## 8. Python e OpenCV: cenas, desfoque de rostos, enquadramento
 
-Só execute se `cv2` estiver disponível (§1). Os scripts leem dos originais
+Só execute se `cv2` estiver disponível (§1).
+
+**Compatibilidade de versão (verificado em testes):** os scripts abaixo
+foram validados com **OpenCV 4.x** (`opencv-python-headless` 4.14). O
+**OpenCV 5.x removeu o `CascadeClassifier`** e os arquivos Haar de
+`cv2.data`; nele, §8.2 falha. Antes de rodar §8.2, confira:
+
+```bash
+python3 -c "import cv2; print(cv2.__version__, hasattr(cv2, 'CascadeClassifier'))"
+```
+
+Se retornar `False`: use OpenCV 4.x (instalação somente com autorização)
+ou o detector `cv2.FaceDetectorYN` (YuNet), que exige o arquivo de modelo
+ONNX `face_detection_yunet_*.onnx` do repositório *opencv_zoo* — o download
+do modelo também requer autorização. §8.1 e §8.3 funcionam nas duas versões.
+
+Os scripts leem dos originais
 ou de trabalho e escrevem **somente** em `02_trabalho/` ou `06_qc/`.
 OpenCV não grava áudio: re-multiplexe o áudio com FFmpeg ao final.
 
@@ -529,8 +545,12 @@ Re-multiplexar áudio e recodificar corretamente:
 
 ```bash
 ffmpeg -i 02_trabalho/blur_sem_audio.mp4 -i "$IN" -map 0:v -map 1:a? \
-  -c:v libx264 -crf 14 -pix_fmt yuv420p -c:a copy -shortest 02_trabalho/blur.mp4
+  -c:v libx264 -crf 14 -pix_fmt yuv420p -c:a copy 02_trabalho/blur.mp4
 ```
+
+Não use `-shortest` aqui: em testes ele descartou o último quadro do vídeo.
+Confira que a contagem de quadros é igual à da origem:
+`ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 <arquivo>`.
 
 **Revisão manual obrigatória:** gere folha de contato a 4 quadros/s do
 resultado (§9.4) e verifique quadro a quadro os trechos com menores.
