@@ -48,7 +48,7 @@ Matriz de decisão:
 |---|---|
 | Só FFmpeg | Tudo de §3–§7 e §9 (cortes, cor, áudio, legendas, QC). Desfoque apenas por região fixa/manual (§8.4). |
 | FFmpeg + Python + NumPy | Scripts de sincronização por BPM, relatórios de QC automatizados. |
-| FFmpeg + Python + OpenCV | Detecção de cenas, desfoque automático de rostos, enquadramento inteligente. |
+| FFmpeg + Python + OpenCV | Detecção de cenas, desfoque automático de rostos (YuNet com modelo ONNX autorizado; Haar só no OpenCV 4.x), enquadramento inteligente. |
 | Nada disponível | Entregar roteiro, decupagem, instruções de edição para app (CapCut, Premiere, DaVinci) e checklist de QC manual. |
 
 Se faltar algo: **informe**, ofereça a alternativa da tabela e **peça
@@ -463,23 +463,23 @@ e preserve a transparência (`format=rgba`).
 
 Só execute se `cv2` estiver disponível (§1).
 
-**Compatibilidade de versão (verificado em testes):** os scripts abaixo
-foram validados com **OpenCV 4.x** (`opencv-python-headless` 4.14). O
-**OpenCV 5.x removeu o `CascadeClassifier`** e os arquivos Haar de
-`cv2.data`; nele, §8.2 falha. Antes de rodar §8.2, confira:
+**Compatibilidade de versão (verificada em testes):**
 
-```bash
-python3 -c "import cv2; print(cv2.__version__, hasattr(cv2, 'CascadeClassifier'))"
-```
+| Script | OpenCV 4.x (testado 4.14) | OpenCV 5.x (testado 5.1) |
+|---|---|---|
+| §8.1 Detecção de cenas | OK | OK |
+| §8.2-A Desfoque YuNet (recomendado) | OK | OK |
+| §8.2-B Desfoque Haar (alternativa) | OK | **Não funciona** (o 5.x removeu `CascadeClassifier` e os arquivos Haar) |
+| §8.3 Enquadramento inteligente | OK | OK |
 
-Se retornar `False`: use OpenCV 4.x (instalação somente com autorização)
-ou o detector `cv2.FaceDetectorYN` (YuNet), que exige o arquivo de modelo
-ONNX `face_detection_yunet_*.onnx` do repositório *opencv_zoo* — o download
-do modelo também requer autorização. §8.1 e §8.3 funcionam nas duas versões.
+Para conferir a versão: `python3 -c "import cv2; print(cv2.__version__, hasattr(cv2, 'FaceDetectorYN'), hasattr(cv2, 'CascadeClassifier'))"`.
+No OpenCV 5.x, o YuNet imprime avisos `setPreferableTarget ... not supported`;
+são inofensivos.
 
 Os scripts leem dos originais
 ou de trabalho e escrevem **somente** em `02_trabalho/` ou `06_qc/`.
 OpenCV não grava áudio: re-multiplexe o áudio com FFmpeg ao final.
+Guarde os scripts e modelos fora das pastas de mídia (ex.: `ferramentas/`).
 
 ### 8.1 Detecção de cenas
 Sem OpenCV (FFmpeg):
@@ -506,7 +506,76 @@ while True:
 print(cortes)
 ```
 
+
 ### 8.2 Desfoque de rostos (proteção infantil)
+
+#### 8.2-A Método recomendado: YuNet (`cv2.FaceDetectorYN`)
+Detector neural, mais robusto que Haar a perfil, oclusão parcial e
+iluminação ruim. Este script também procura rostos no quadro girado 180°
+— nos testes, o rosto de cabeça para baixo (comum no Jiu-Jitsu) passou
+despercebido pelo detector sem rotação em 119 de 120 quadros e pelo
+método Haar em 3 de 120; com a passada girada, o YuNet desfocou 120 de 120.
+
+**Modelo:** `face_detection_yunet_2023mar.onnx` (≈ 227 KB, licença MIT),
+do repositório oficial *opencv_zoo*. O download exige autorização do
+usuário. Fonte e integridade:
+
+```bash
+mkdir -p ferramentas/modelos
+curl -fL -o ferramentas/modelos/face_detection_yunet_2023mar.onnx \
+  "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
+echo "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4  ferramentas/modelos/face_detection_yunet_2023mar.onnx" | sha256sum -c
+```
+
+Se o hash não conferir, não use o arquivo.
+
+```python
+"""Uso: python3 -I blur_faces_yunet.py MODELO.onnx ENTRADA SAIDA_SEM_AUDIO [margem=0.35] [limiar=0.6]
+Desfoque de rostos com o detector YuNet (cv2.FaceDetectorYN; OpenCV >= 4.8 e 5.x).
+Detecta também com o quadro girado 180° (cabeça invertida, comum no Jiu-Jitsu)
+e mantém o desfoque por 0,5 s quando a detecção falha (persistência)."""
+import cv2, sys
+modelo, src, dst = sys.argv[1], sys.argv[2], sys.argv[3]
+margem = float(sys.argv[4]) if len(sys.argv) > 4 else 0.35
+limiar = float(sys.argv[5]) if len(sys.argv) > 5 else 0.6
+cap = cv2.VideoCapture(src)
+fps = cap.get(cv2.CAP_PROP_FPS) or 30
+w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+esc = min(1.0, 960 / max(w, h))                 # detecta em resolução reduzida (velocidade)
+dw, dh = int(w * esc), int(h * esc)
+det = cv2.FaceDetectorYN.create(modelo, "", (dw, dh), limiar, 0.3, 5000)
+out = cv2.VideoWriter(dst, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+memoria, PERSIST = [], int(fps * 0.5)
+def detectar(img):
+    _, faces = det.detect(img)
+    return [] if faces is None else [tuple(f[:4]) for f in faces]
+while True:
+    ok, f = cap.read()
+    if not ok: break
+    p = cv2.resize(f, (dw, dh))
+    caixas = detectar(p)
+    caixas += [(dw - x - bw, dh - y - bh, bw, bh) for (x, y, bw, bh) in detectar(cv2.rotate(p, cv2.ROTATE_180))]
+    caixas = [tuple(int(v / esc) for v in c) for c in caixas]
+    memoria = [(b, PERSIST) for b in caixas] + [(b, n - 1) for b, n in memoria if n > 1]
+    for (x, y, bw, bh), _ in memoria:
+        mx, my = int(bw * margem), int(bh * margem)
+        x0, y0, x1, y1 = max(0, x - mx), max(0, y - my), min(w, x + bw + mx), min(h, y + bh + my)
+        roi = f[y0:y1, x0:x1]
+        if roi.size:
+            k = max(31, (min(roi.shape[:2]) // 2) | 1)
+            f[y0:y1, x0:x1] = cv2.GaussianBlur(roi, (k, k), 0)
+    out.write(f)
+cap.release(); out.release()
+```
+
+Desempenho de referência: ~2,5–3x o tempo real em 1080p na CPU (duas
+passadas por quadro). Para vídeos longos, processe só os trechos que
+entram na edição.
+
+#### 8.2-B Alternativa: Haar (somente OpenCV 4.x, sem download)
+Use apenas quando o modelo YuNet não estiver disponível. **Não detecta
+cabeça invertida** e erra mais em perfil e movimento rápido; exige revisão
+manual ainda mais rigorosa.
 
 ```python
 """Uso: python3 -I blur_faces.py ENTRADA SAIDA_SEM_AUDIO [margem=0.35]
@@ -541,7 +610,7 @@ while True:
 cap.release(); out.release()
 ```
 
-Re-multiplexar áudio e recodificar corretamente:
+#### 8.2-C Re-multiplexar o áudio
 
 ```bash
 ffmpeg -i 02_trabalho/blur_sem_audio.mp4 -i "$IN" -map 0:v -map 1:a? \
@@ -552,12 +621,32 @@ Não use `-shortest` aqui: em testes ele descartou o último quadro do vídeo.
 Confira que a contagem de quadros é igual à da origem:
 `ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of csv=p=0 <arquivo>`.
 
-**Revisão manual obrigatória:** gere folha de contato a 4 quadros/s do
-resultado (§9.4) e verifique quadro a quadro os trechos com menores.
-Haar cascades falham em perfil extremo, rosto parcialmente coberto,
-movimento rápido, cabeça invertida (comum no Jiu-Jitsu) e baixa luz. Se
-houver qualquer quadro com rosto exposto sem autorização, aplique desfoque
-manual por região (§8.4) ou descarte o trecho.
+#### 8.2-D Verificação do desfoque
+1. **Automática:** conte os quadros em que ainda há rosto detectável no
+   resultado, na orientação normal e girada 180° (deve dar 0 nos trechos
+   com menores sem autorização):
+
+```python
+"""Uso: python3 -I conta_rostos.py MODELO.onnx VIDEO"""
+import cv2, sys
+cap = cv2.VideoCapture(sys.argv[2]); w, h = int(cap.get(3)), int(cap.get(4))
+d = cv2.FaceDetectorYN.create(sys.argv[1], "", (w, h), 0.6, 0.3, 5000)
+n = normal = girado = 0
+while True:
+    ok, f = cap.read()
+    if not ok: break
+    n += 1
+    normal += d.detect(f)[1] is not None
+    girado += d.detect(cv2.rotate(f, cv2.ROTATE_180))[1] is not None
+print(f"quadros={n} rosto_normal={normal} rosto_girado={girado}")
+```
+
+2. **Manual (obrigatória):** gere folha de contato a 4 quadros/s do
+   resultado (§9.4) e verifique quadro a quadro os trechos com menores. A
+   contagem automática usa o mesmo tipo de detector, então não enxerga o
+   que ele também não enxerga. Se houver qualquer quadro com rosto exposto
+   sem autorização, aumente a margem (ex.: 0.6), reduza o limiar (ex.: 0.4),
+   aplique desfoque manual por região (§8.4) ou descarte o trecho.
 
 ### 8.3 Enquadramento inteligente (horizontal → vertical)
 Estratégia: calcular o centro de massa do movimento por quadro (diferença
