@@ -79,10 +79,14 @@ leia diretamente de lá ou crie links simbólicos em `00_originais/`.
 
 ```bash
 cd "00_originais"
-find . -type f ! -name 'SHA256SUMS' -print0 | sort -z | xargs -0 sha256sum > ../06_qc/SHA256SUMS_originais.txt
+find . \( -type f -o -type l \) ! -name 'SHA256SUMS' -print0 | sort -z | xargs -0 sha256sum > ../06_qc/SHA256SUMS_originais.txt
 chmod -R a-w .        # proteção contra escrita (cópias locais; não altere permissões em pastas que não são suas sem autorização)
 cd ..
 ```
+
+Atenção: quando a sessão roda como **root** (comum em contêineres), `chmod a-w`
+não impede gravação. Nesse caso, a garantia real é a conferência do hash (§2.4),
+somada à disciplina de nunca apontar uma saída para `00_originais/`.
 
 ### 2.3 Regras durante a edição
 - Toda saída vai para `02_trabalho/` ou `05_exports/`; nunca para `00_originais/`.
@@ -222,6 +226,15 @@ Transições úteis: `fade`, `fadeblack` (passagem de tempo), `slideleft`,
 Para encadear 3+ clipes, o offset de cada transição soma as durações já
 montadas menos as sobreposições anteriores.
 
+Ao combinar `concat` e `xfade` no mesmo grafo, as bases de tempo divergem
+(erro "First input link main timebase ... do not match"). Normalize as duas
+entradas do `xfade` com `settb=AVTB`:
+
+```
+[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[vAr][aA];[vAr]settb=AVTB[vA];[2:v]settb=AVTB[vB];
+[vA][vB]xfade=transition=smoothleft:duration=0.25:offset=<dur_A-0.25>[v]
+```
+
 Efeito de **whip pan digital** (borrão direcional curto) sobre os 6 quadros
 finais de A e iniciais de B: aplique
 `gblur=sigma=25:sigmaV=0:enable='gte(t,DUR-0.2)'` no fim de A e
@@ -240,6 +253,17 @@ finais de A e iniciais de B: aplique
 ### 4.6 Punch-in (reenquadramento de 115%)
 `scale=iw*1.15:-2,crop=1080:1920` — para variar jump cuts e enfatizar
 detalhes. Não ultrapasse ~125% em material 1080p (perda de nitidez).
+
+**Push-in lento** (zoom progressivo, ex.: CTA sobre imagem em movimento em vez de
+quadro parado; de 115% a 126,5% em 3,5 s = 105 quadros). Amplie 2x antes do
+`zoompan` para evitar tremor por arredondamento:
+
+```
+scale=-2:1920,crop=1080:1920,scale=2160:3840:flags=lanczos,zoompan=z='1.15+0.115*on/105':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1080x1920:fps=30
+```
+
+Não use `scale` com `eval=frame` para zoom: o tamanho variável do quadro quebra
+os filtros seguintes (`crop`).
 
 ### 4.7 Sincronização com a batida
 Com BPM conhecido e o tempo da primeira batida forte (`t0`, em segundos,
@@ -276,7 +300,7 @@ curves=master='0/0.02 0.25/0.22 0.75/0.80 1/0.98'   # S suave sem esmagar pretos
 
 ```bash
 # Tatame Noir
-LOOK_NOIR="eq=contrast=1.18:saturation=0.75:gamma=0.95,curves=master='0/0 0.20/0.12 0.60/0.62 1/0.97',vignette=PI/5"
+LOOK_NOIR="eq=contrast=1.18:saturation=0.75:gamma=0.95,curves=master='0/0 0.20/0.12 0.60/0.62 0.85/0.83 1/0.92',vignette=PI/5"
 # Golden Family
 LOOK_GOLD="colortemperature=temperature=4900,eq=contrast=0.96:saturation=1.08:brightness=0.02,curves=master='0/0.05 0.5/0.52 1/0.98'"
 # Clean Pro
@@ -317,6 +341,14 @@ marque-o antes da cadeia com
 (use `smpte2084` no lugar de `arib-std-b67` para PQ) — somente se tiver
 certeza de que a origem é HDR.
 
+**Confira o resultado do tonemapping** medindo a cor de uma área neutra
+(ex.: tatame) contra um plano SDR vizinho. Se um canal for esmagado a 0 ou
+a imagem ganhar cores saturadas/deslocadas, o arquivo provavelmente está
+**marcado** como HDR, mas o conteúdo é SDR (alguns aplicativos fazem isso). Nesse
+caso, não use tonemapping: corrija a marcação com
+`setparams=color_trc=bt709:color_primaries=bt709:colorspace=bt709:range=tv`
+e trate o arquivo como SDR.
+
 Sem `zscale`: informe a limitação; alternativa é exportar do celular em
 SDR ("Mais compatível") ou usar `libplacebo` se houver GPU. Nunca entregue
 HDR sem tonemapping — cores lavadas ou estouradas na plataforma.
@@ -325,8 +357,10 @@ HDR sem tonemapping — cores lavadas ou estouradas na plataforma.
 Sempre: `-colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv`.
 
 ### 5.7 Critérios de aprovação de cor
-- Nenhum clipping relevante nos kimonos brancos (verificar com
-  `signalstats`, §9.3: YMAX ≤ 235 na maior parte dos quadros).
+- Nenhum clipping relevante nos kimonos brancos: percentual de pixels com
+  Y > 235 próximo de 0 fora das legendas (medição em §9.3). `eq=contrast`
+  age direto na luminância e empurra os brancos acima de 235. Compense com
+  ponto de branco da curva ≤ 0,92 ("highlight roll-off") e meça sempre.
 - Pretos com detalhe (YMIN próximo de 16, não esmagados por longos trechos).
 - Pele natural em todos os planos; planos da mesma cena sem saltos de
   temperatura perceptíveis.
@@ -382,8 +416,15 @@ Passe 2 — aplicar com os valores medidos (`input_i`, `input_tp`,
 loudnorm=I=-14:TP=-1.5:LRA=11:measured_I=<input_i>:measured_TP=<input_tp>:measured_LRA=<input_lra>:measured_thresh=<input_thresh>:offset=<target_offset>:linear=true
 ```
 
-Alvo: -14 LUFS integrado (±1), true peak ≤ -1,0 dBTP. Se `linear=true` não
-puder ser aplicado (faixa dinâmica excessiva), comprima antes e repita.
+Alvo: -14 LUFS integrado (±1), true peak ≤ -1,0 dBTP.
+
+O passe 1 **sempre** informa `normalization_type: dynamic`. O que importa é o
+**passe 2** (adicione `:print_format=json` a ele): se também disser `dynamic`, o
+ganho necessário levaria o pico acima do alvo e o `loudnorm` passa a comprimir
+dinamicamente (pode "bombear"). Correção testada: antes do passe 1, aplique ganho
+e limitador com teto ≈ -4 dBFS, por exemplo
+`acompressor=threshold=-18dB:ratio=3:attack=5:release=150,volume=9dB,alimiter=limit=0.63:level=false`,
+ajuste o ganho e repita até o passe 2 reportar `linear`.
 O `loudnorm` reamostra internamente para 192 kHz: sempre adicione
 `aresample=48000` depois.
 
@@ -408,9 +449,9 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Fala,Montserrat ExtraBold,66,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,5,2,2,90,160,560,1
-Style: Titulo,Bebas Neue,104,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,-1,0,0,0,100,100,1,0,1,6,3,8,90,160,330,1
-Style: Destaque,Montserrat ExtraBold,66,&H00FFFFFF,&H000000FF,&H000000C8,&H00000000,-1,0,0,0,100,100,0,0,3,14,0,2,90,160,560,1
+Style: Fala,Montserrat ExtraBold,66,&H00EBEBEB,&H000000FF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,5,2,2,90,160,560,1
+Style: Titulo,Bebas Neue,104,&H00EBEBEB,&H000000FF,&H00000000,&H64000000,-1,0,0,0,100,100,1,0,1,6,3,8,90,160,330,1
+Style: Destaque,Montserrat ExtraBold,66,&H00EBEBEB,&H000000FF,&H002A1ED6,&H00000000,-1,0,0,0,100,100,0,0,3,14,0,2,90,160,560,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -426,7 +467,13 @@ Notas:
 - `Alignment` 2 = centro inferior; 8 = centro superior. `MarginV` 560 coloca
   a fala por volta de y ≈ 1360 (acima da interface); `MarginR` 160 evita os
   botões da direita.
-- `BorderStyle 3` desenha caixa atrás do texto (estilo "Destaque").
+- `BorderStyle 3` desenha caixa atrás do texto (estilo "Destaque"), na cor de
+  `OutlineColour`. Para legibilidade sobre kimonos brancos, use caixa preta
+  semitransparente (`OutlineColour` `&H50000000`, `BorderStyle 3`).
+- **Branco legal:** o libass desenha `&H00FFFFFF` como Y = 255 (super-branco) sobre
+  vídeo de faixa limitada. Use `&H00EBEBEB` como branco e aplique
+  `limiter=min=16:max=235:planes=1` logo após o filtro `subtitles` (testado: os
+  pixels fora da faixa caíram de 1,9% para 0,3% nos quadros com título grande).
 - `\k` (centésimos de segundo) faz destaque palavra a palavra com
   `SecondaryColour` → `PrimaryColour`.
 - `\t(0,100,...)` cria o "pop" de entrada em 100 ms.
@@ -435,7 +482,7 @@ Notas:
 
 ```bash
 ffmpeg -hide_banner -i 02_trabalho/montagem_cor.mp4 \
-  -vf "subtitles=04_legendas/legendas.ass:fontsdir=fonts" \
+  -vf "subtitles=04_legendas/legendas.ass:fontsdir=fonts,limiter=min=16:max=235:planes=1" \
   -c:v libx264 -crf 14 -c:a copy 02_trabalho/montagem_leg.mp4
 ```
 
@@ -533,7 +580,8 @@ Se o hash não conferir, não use o arquivo.
 """Uso: python3 -I blur_faces_yunet.py MODELO.onnx ENTRADA SAIDA_SEM_AUDIO [margem=0.35] [limiar=0.6]
 Desfoque de rostos com o detector YuNet (cv2.FaceDetectorYN; OpenCV >= 4.8 e 5.x).
 Detecta também com o quadro girado 180° (cabeça invertida, comum no Jiu-Jitsu)
-e mantém o desfoque por 0,5 s quando a detecção falha (persistência)."""
+e mantém o desfoque por 0,5 s quando a detecção falha (persistência), ampliando
+a área com o tempo para cobrir rostos em movimento."""
 import cv2, sys
 modelo, src, dst = sys.argv[1], sys.argv[2], sys.argv[3]
 margem = float(sys.argv[4]) if len(sys.argv) > 4 else 0.35
@@ -541,7 +589,9 @@ limiar = float(sys.argv[5]) if len(sys.argv) > 5 else 0.6
 cap = cv2.VideoCapture(src)
 fps = cap.get(cv2.CAP_PROP_FPS) or 30
 w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-esc = min(1.0, 960 / max(w, h))                 # detecta em resolução reduzida (velocidade)
+# Detecta em até 1920 px no lado maior. NÃO reduza mais: em testes, a 960 px um rosto
+# pequeno (criança ao fundo, ~45x65 px em 1080p) deixou de ser detectado e ficou exposto.
+esc = min(1.0, 1920 / max(w, h))
 dw, dh = int(w * esc), int(h * esc)
 det = cv2.FaceDetectorYN.create(modelo, "", (dw, dh), limiar, 0.3, 5000)
 out = cv2.VideoWriter(dst, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
@@ -557,8 +607,9 @@ while True:
     caixas += [(dw - x - bw, dh - y - bh, bw, bh) for (x, y, bw, bh) in detectar(cv2.rotate(p, cv2.ROTATE_180))]
     caixas = [tuple(int(v / esc) for v in c) for c in caixas]
     memoria = [(b, PERSIST) for b in caixas] + [(b, n - 1) for b, n in memoria if n > 1]
-    for (x, y, bw, bh), _ in memoria:
-        mx, my = int(bw * margem), int(bh * margem)
+    for (x, y, bw, bh), n in memoria:
+        m = margem + 0.6 * (PERSIST - n) / PERSIST   # caixa antiga cresce (rosto pode ter se movido)
+        mx, my = int(bw * m), int(bh * m)
         x0, y0, x1, y1 = max(0, x - mx), max(0, y - my), min(w, x + bw + mx), min(h, y + bh + my)
         roi = f[y0:y1, x0:x1]
         if roi.size:
@@ -568,8 +619,8 @@ while True:
 cap.release(); out.release()
 ```
 
-Desempenho de referência: ~2,5–3x o tempo real em 1080p na CPU (duas
-passadas por quadro). Para vídeos longos, processe só os trechos que
+Desempenho de referência: ~3–6x o tempo real em 1080p na CPU (duas
+passadas por quadro, resolução completa). Para vídeos longos, processe só os trechos que
 entram na edição.
 
 #### 8.2-B Alternativa: Haar (somente OpenCV 4.x, sem download)
@@ -642,7 +693,8 @@ print(f"quadros={n} rosto_normal={normal} rosto_girado={girado}")
 ```
 
 2. **Manual (obrigatória):** gere folha de contato a 4 quadros/s do
-   resultado (§9.4) e verifique quadro a quadro os trechos com menores. A
+   resultado (§9.4), recortada na região das pessoas e em escala ≥ 50% (miniaturas
+   menores geram falsos alarmes e escondem falhas reais), e verifique quadro a quadro os trechos com menores. A
    contagem automática usa o mesmo tipo de detector, então não enxerga o
    que ele também não enxerga. Se houver qualquer quadro com rosto exposto
    sem autorização, aumente a margem (ex.: 0.6), reduza o limiar (ex.: 0.4),
@@ -666,7 +718,10 @@ while True:
         d = cv2.threshold(cv2.absdiff(prev, g), 18, 255, cv2.THRESH_BINARY)[1]
         m = cv2.moments(d); xs.append(m["m10"] / m["m00"] if m["m00"] > 0 else xs[-1])
     prev = g
-xs = np.convolve(np.array(xs), np.ones(int(fps)) / int(fps), mode="same")   # suavização de 1 s
+if len(xs) > 1: xs[0] = xs[1]                                       # 1º quadro não tem movimento medido
+k = int(fps)                                                         # suavização de 1 s
+xs = np.convolve(np.pad(np.array(xs), (k // 2, k - 1 - k // 2), mode="edge"), np.ones(k) / k, mode="valid")
+# (pad "edge": sem ele, as bordas são completadas com zeros e o recorte é puxado para a esquerda no início/fim)
 xs = np.clip(xs - cw / 2, 0, W - cw).astype(int)
 # Amostra a cada 0,5 s para um arquivo de comandos do sendcmd
 with open(sys.argv[2], "w") as fh:
@@ -755,6 +810,17 @@ ffmpeg -hide_banner -nostats -i "$F" -vf freezedetect=n=-60dB:d=0.5 -an -f null 
 ffmpeg -hide_banner -nostats -i "$F" -vf "signalstats,metadata=print:key=lavfi.signalstats.YMAX:file=06_qc/ymax.txt" -an -f null -
 ```
 
+O YMAX acusa até um único pixel (ex.: borda de legenda). Para julgar o
+clipping, meça o **percentual** de pixels acima de 235, a cada 0,5 s:
+
+```python
+import subprocess, sys, numpy as np
+f = sys.argv[1]; W, H = 1080, 1920
+p = subprocess.run(["ffmpeg", "-v", "error", "-i", f, "-vf", "fps=2", "-pix_fmt", "gray", "-f", "rawvideo", "-"], capture_output=True).stdout
+fr = np.frombuffer(p, np.uint8).reshape(-1, H, W)
+print(" ".join(f"{(x > 235).mean() * 100:4.1f}" for x in fr))
+```
+
 | Medição | Critério de aprovação |
 |---|---|
 | Loudness integrado | -14 LUFS ± 1 |
@@ -762,7 +828,7 @@ ffmpeg -hide_banner -nostats -i "$F" -vf "signalstats,metadata=print:key=lavfi.s
 | Silêncio | nenhum > 1 s não intencional |
 | Preto | nenhum no início; nenhum > 0,1 s não intencional |
 | Congelamento | nenhum não intencional |
-| Clipping | YMAX > 235 em no máximo trechos curtos e não em kimonos/rostos |
+| Clipping | Pixels com Y > 235 ≈ 0% na imagem; até ~0,5% tolerado só em bordas de texto, nunca em kimonos/rostos |
 
 ### 9.4 Inspeção visual
 
